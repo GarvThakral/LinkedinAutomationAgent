@@ -58,13 +58,22 @@ We chose this approach because:
 
 This is the backend service for the project, built with **FastAPI** and **PostgreSQL**, designed to handle user authentication, LinkedIn integration, content generation, CSV uploads, and posting content to LinkedIn.
 
+You must have a PostgreSQL server running (locally or hosted) and configured with the credentials specified in your .env or the default settings:
+
+text
+database = influence
+user     = postgres
+password = mypassword
+host     = localhost
+port     = 5432
+
 ---
 
 ## 📦 Installation & Setup
 
 ### 1️⃣ Clone the Repository
-git clone <your-repo-url>
-cd<your-repo-folder>
+git clone https://github.com/GarvThakral/LinkedinAutomationAgent.git
+cd LinkedinAutomationAgent
 
 
 ### 2️⃣ Python Version
@@ -92,6 +101,15 @@ user = postgres
 password = mypassword
 host = localhost
 port = 5432
+
+## You must have a PostgreSQL server running (locally or hosted) and configured with the credentials specified in your .env or the default settings:
+
+text
+database = influence
+user     = postgres
+password = mypassword
+host     = localhost
+port     = 5432
 
 The database will be auto-created if it doesn't exist.
 
