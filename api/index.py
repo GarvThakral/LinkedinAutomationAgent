@@ -69,6 +69,13 @@ app.add_middleware(
 )
 
 # ---------------- ROUTES ----------------
+@app.get("/")
+def health_checks():
+    return {"status": "healthy", "message": "API is running"}
+
+@app.get("/health")  
+def detailed_health():
+    return {"status": "ok", "timestamp": "2024-08-14"}
 
 @app.get("/")
 def root():
