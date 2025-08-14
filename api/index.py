@@ -438,5 +438,16 @@ def get_all_user_details():
 
 if __name__ == "__main__":
     import uvicorn
-    print("🚀 Starting FastAPI with Neon DB...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    
+    # Get port from environment (Render sets this automatically)
+    port = int(os.getenv("PORT", 8000))
+    
+    print(f"🚀 Starting FastAPI with Neon DB on port {port}...")
+    
+    # IMPORTANT: Bind to 0.0.0.0 (not 127.0.0.1) for Render
+    uvicorn.run(
+        app, 
+        host="0.0.0.0",  # ✅ This allows external connections
+        port=port
+    )
