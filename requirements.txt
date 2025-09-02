@@ -4,7 +4,7 @@ dotenv
 requests
 psycopg2-binary
 numpy 
-pandas
+
 langchain
 langchain-cohere
 bs4
