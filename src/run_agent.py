@@ -265,7 +265,8 @@ def create_and_post_linkedin_content(content_data, image_urls, post_type, linked
                 "shareMediaCategory": "IMAGE" if media_urns else "NONE"
             }
         },
-        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "CONNECTIONS"}
+        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"}
+
     }
     
     if media_urns:
