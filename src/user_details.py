@@ -1,11 +1,10 @@
 from dotenv import load_dotenv
 import os
 import requests
-import pandas as pd
 import psycopg2
 from psycopg2 import sql
 from bs4 import BeautifulSoup
-
+import csv
 # Load environment variables
 load_dotenv()
 
@@ -118,6 +117,8 @@ def login(email, password):
 
 
 # ---------------- GET USER DETAILS + SAVE ----------------
+import csv
+
 def get_user_details():
     access_token = os.getenv("ACCESS_TOKEN")
 
@@ -133,31 +134,40 @@ def get_user_details():
     except Exception as e:
         print("⚠️ LinkedIn API Error:", e)
 
-    # Read CSV data
+    # --- Replace pandas with csv ---
+    client_info = {}
     try:
-        data = pd.read_csv("Profile.csv")
-        client_name = str(data['First Name'][0]) + " " + str(data['Last Name'][0])
-        about_client = str(data['Summary'][0]) if not pd.isna(data['Summary'][0]) else ''
-        client_industry = str(data['Industry'][0]) if not pd.isna(data['Industry'][0]) else ''
-        client_website = str(data["Websites"][0]) if not pd.isna(data["Websites"][0]) else ''
-        
-        client_info = {
-            'name': client_name,
-            'about': about_client,
-            'industry': client_industry,
-            'website': client_website
-        }
-        
-        print("Parsed client info:", client_info)
-        
+        with open("Profile.csv", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+            first_row = next(reader, None)
+
+            if first_row:
+                client_name = f"{first_row.get('First Name','').strip()} {first_row.get('Last Name','').strip()}"
+                about_client = first_row.get('Summary', '').strip()
+                client_industry = first_row.get('Industry', '').strip()
+                client_website = first_row.get('Websites', '').strip()
+
+                client_info = {
+                    'name': client_name,
+                    'about': about_client,
+                    'industry': client_industry,
+                    'website': client_website
+                }
+                print("Parsed client info:", client_info)
+            else:
+                print("❌ CSV is empty")
+                return None
+
+    except FileNotFoundError:
+        print("❌ Profile.csv not found")
+        return None
     except Exception as e:
         print(f"❌ Error reading CSV: {e}")
         return None
 
-    # Optional website scraping
-    if client_info['website'] and client_info['website'] != 'nan':
+    # --- Website scraping ---
+    if client_info['website'] and client_info['website'].lower() != 'nan':
         try:
-            # Add http if missing
             website_url = client_info['website']
             if not website_url.startswith(('http://', 'https://')):
                 website_url = 'https://' + website_url
@@ -169,12 +179,11 @@ def get_user_details():
         except Exception as e:
             print(f"Website fetch error: {e}")
 
-    # Save to Neon DB
+    # --- Save to Neon DB ---
     conn = get_db_conn()
     cur = conn.cursor()
     
     try:
-        # Create table if not exists
         cur.execute("""
         CREATE TABLE IF NOT EXISTS user_details (
             id SERIAL PRIMARY KEY,
@@ -188,7 +197,6 @@ def get_user_details():
         """)
         conn.commit()
 
-        # Insert user details
         cur.execute("""
         INSERT INTO user_details (name, about, industry, website)
         VALUES (%s, %s, %s, %s)
@@ -208,7 +216,6 @@ def get_user_details():
     finally:
         cur.close()
         conn.close()
-
 
 # ---------------- GET ALL USERS (UTILITY FUNCTION) ----------------
 def get_all_users():

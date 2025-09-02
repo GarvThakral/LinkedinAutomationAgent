@@ -8,10 +8,10 @@ import requests
 import os
 from typing import Any, List
 import psycopg2
-import numpy as np
-import pandas as pd
+import csv
 from psycopg2.extras import RealDictCursor
 from src.run_agent import create_and_post_linkedin_content
+import io
 
 # Load environment variables
 load_dotenv()
@@ -233,23 +233,41 @@ async def upload_csv(
         raise HTTPException(status_code=400, detail="Invalid file type. Only CSV files allowed.")
     
     try:
-        # Read CSV
-        df = pd.read_csv(file.file)
-        df = df.replace({np.nan: None, np.inf: None, -np.inf: None})
-
-        if len(df) == 0:
+        # Read file content
+        content = await file.read()
+        
+        # Decode bytes to string
+        content_str = content.decode('utf-8')
+        
+        # Create a string IO object for csv.DictReader
+        csv_file = io.StringIO(content_str)
+        
+        # Read CSV using DictReader
+        reader = csv.DictReader(csv_file)
+        
+        # Convert to list of dictionaries
+        rows = list(reader)
+        
+        if len(rows) == 0:
             raise HTTPException(status_code=400, detail="CSV file is empty")
 
-        first_row = df.iloc[0]
+        # Get first row
+        first_row = rows[0]
+        
+        # Get column names
+        columns = list(reader.fieldnames) if reader.fieldnames else []
 
-        # Extract user details
-        first_name = first_row.get('First Name') or ''
-        last_name = first_row.get('Last Name') or ''
+        # Extract user details with safe get method
+        def safe_get(row, key, default=''):
+            return row.get(key, default) if row.get(key) is not None else default
+
+        first_name = safe_get(first_row, 'First Name')
+        last_name = safe_get(first_row, 'Last Name')
         full_name = f"{first_name} {last_name}".strip()
 
-        summary = first_row.get('Summary') or ''
-        industry = first_row.get('Industry') or ''
-        website = first_row.get('Websites') or ''
+        summary = safe_get(first_row, 'Summary')
+        industry = safe_get(first_row, 'Industry')
+        website = safe_get(first_row, 'Websites')
 
         # Save to Neon DB
         conn = get_neon_connection()
@@ -295,9 +313,9 @@ async def upload_csv(
 
             return {
                 "filename": file.filename,
-                "rows": len(df),
-                "columns": list(df.columns),
-                "data": df.to_dict(orient="records"),
+                "rows": len(rows),
+                "columns": columns,
+                "data": rows,
                 "message": message
             }
 
@@ -308,7 +326,9 @@ async def upload_csv(
             cursor.close()
             conn.close()
 
-    except pd.Error as csv_error:
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="CSV file encoding error. Please ensure file is UTF-8 encoded.")
+    except csv.Error as csv_error:
         raise HTTPException(status_code=400, detail=f"CSV processing error: {str(csv_error)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
@@ -444,7 +464,6 @@ def get_all_user_details():
         conn.close()
 
 if __name__ == "__main__":
-    import uvicorn
     import os
     
     # Get port from environment (Render sets this automatically)
@@ -452,9 +471,3 @@ if __name__ == "__main__":
     
     print(f"🚀 Starting FastAPI with Neon DB on port {port}...")
     
-    # IMPORTANT: Bind to 0.0.0.0 (not 127.0.0.1) for Render
-    uvicorn.run(
-        app, 
-        host="0.0.0.0",  # ✅ This allows external connections
-        port=port
-    )
