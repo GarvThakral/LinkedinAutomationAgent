@@ -169,6 +169,12 @@ def run_agent(client_info, post_type, target_industry, content_goals):
         # Call the direct function instead
         try:
             image_urls = generate_images_direct(content_data['image_instructions'])
+            if not image_urls:
+                image_urls = [
+                    "https://free-cdn.mitraai.xyz/b4f006e7-f485-4785-a008-3236c284e2d8.jpg",
+                    "https://free-cdn.mitraai.xyz/3adcd7be-ede2-4cc8-8e89-4298bf6cbbf8.jpg",
+                    "https://free-cdn.mitraai.xyz/8329263a-fdcc-4429-964d-de61a90e0f23.jpg"
+                ]
         except Exception as e:
             print(f"Image generation failed: {e}")
             image_urls = []
