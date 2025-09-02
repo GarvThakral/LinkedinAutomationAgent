@@ -145,7 +145,8 @@ def run_agent_orch(payload: MakePostRequest):
             target_industry=client_info.get('industry'),
             content_goals=payload.contentRequirements + " Tone of the post = " + payload.postTone
         )
-        
+        result["name"] = client_info['name']
+        result["industry"] = client_info['industry']
         return result
 
     except Exception as e:
