@@ -3,8 +3,8 @@ import os
 import requests
 import psycopg2
 from psycopg2 import sql
+from psycopg2.extras import RealDictCursor
 from bs4 import BeautifulSoup
-import csv
 # Load environment variables
 load_dotenv()
 
@@ -117,74 +117,31 @@ def login(email, password):
 
 
 # ---------------- GET USER DETAILS + SAVE ----------------
-import csv
-
 def get_user_details():
+    """
+    Return the most recent user details saved in the database.
+    Falls back to LinkedIn userinfo (if ACCESS_TOKEN is set) and,
+    if nothing is available, a minimal default payload. No CSV needed.
+    """
     access_token = os.getenv("ACCESS_TOKEN")
-
     headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     profile_data = {}
-    
-    # Try to get LinkedIn data
+
     try:
-        profile_response = requests.get("https://api.linkedin.com/v2/userinfo", headers=headers)
-        print("LinkedIn API status:", profile_response.status_code)
+        profile_response = requests.get(
+            "https://api.linkedin.com/v2/userinfo", headers=headers, timeout=10
+        )
         if profile_response.status_code == 200:
             profile_data = profile_response.json()
     except Exception as e:
         print("⚠️ LinkedIn API Error:", e)
 
-    # --- Replace pandas with csv ---
-    client_info = {}
-    try:
-        with open("Profile.csv", newline="", encoding="utf-8") as csvfile:
-            reader = csv.DictReader(csvfile)
-            first_row = next(reader, None)
-
-            if first_row:
-                client_name = f"{first_row.get('First Name','').strip()} {first_row.get('Last Name','').strip()}"
-                about_client = first_row.get('Summary', '').strip()
-                client_industry = first_row.get('Industry', '').strip()
-                client_website = first_row.get('Websites', '').strip()
-
-                client_info = {
-                    'name': client_name,
-                    'about': about_client,
-                    'industry': client_industry,
-                    'website': client_website
-                }
-                print("Parsed client info:", client_info)
-            else:
-                print("❌ CSV is empty")
-                return None
-
-    except FileNotFoundError:
-        print("❌ Profile.csv not found")
-        return None
-    except Exception as e:
-        print(f"❌ Error reading CSV: {e}")
-        return None
-
-    # --- Website scraping ---
-    if client_info['website'] and client_info['website'].lower() != 'nan':
-        try:
-            website_url = client_info['website']
-            if not website_url.startswith(('http://', 'https://')):
-                website_url = 'https://' + website_url
-                
-            page = requests.get(website_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-            soup = BeautifulSoup(page.content, 'html.parser')
-            text = soup.get_text(separator=' ', strip=True)
-            print("Website snippet:", text[:200] + "...")
-        except Exception as e:
-            print(f"Website fetch error: {e}")
-
-    # --- Save to Neon DB ---
     conn = get_db_conn()
-    cur = conn.cursor()
-    
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
     try:
-        cur.execute("""
+        cur.execute(
+            """
         CREATE TABLE IF NOT EXISTS user_details (
             id SERIAL PRIMARY KEY,
             name TEXT,
@@ -194,25 +151,57 @@ def get_user_details():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        """)
+        """
+        )
         conn.commit()
 
-        cur.execute("""
-        INSERT INTO user_details (name, about, industry, website)
-        VALUES (%s, %s, %s, %s)
-        RETURNING id
-        """, (client_info['name'], client_info['about'], client_info['industry'], client_info['website']))
-        
-        user_detail_id = cur.fetchone()[0]
-        conn.commit()
-        
-        print(f"✅ Client details saved to Neon DB with ID: {user_detail_id}")
+        cur.execute(
+            """
+        SELECT name, about, industry, website
+        FROM user_details
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        )
+        row = cur.fetchone()
+
+        if row:
+            client_info = dict(row)
+        else:
+            client_info = {
+                "name": profile_data.get("name") or "LinkedIn Member",
+                "about": "",
+                "industry": profile_data.get("locale", ""),
+                "website": "",
+            }
+
+        if client_info.get("website"):
+            try:
+                website_url = client_info["website"]
+                if not website_url.startswith(("http://", "https://")):
+                    website_url = "https://" + website_url
+
+                page = requests.get(
+                    website_url,
+                    timeout=10,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                soup = BeautifulSoup(page.content, "html.parser")
+                text = soup.get_text(separator=" ", strip=True)
+                print("Website snippet:", text[:200] + "...")
+            except Exception as e:
+                print(f"Website fetch error: {e}")
+
         return client_info
-        
+
     except Exception as e:
-        print(f"❌ Failed to save to DB: {e}")
-        conn.rollback()
-        return None
+        print(f"❌ Failed to fetch user details: {e}")
+        return {
+            "name": "LinkedIn Member",
+            "about": "",
+            "industry": "",
+            "website": "",
+        }
     finally:
         cur.close()
         conn.close()

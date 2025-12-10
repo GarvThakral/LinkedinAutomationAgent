@@ -1,0 +1,13 @@
+__pycache__
+creds
+make
+new.py
+Profile.csv
+venv
+.env
+*.pyc
+*.pyo
+.env
+.git
+node_modules
+tests
