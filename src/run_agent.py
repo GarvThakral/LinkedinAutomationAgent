@@ -1,11 +1,12 @@
 import json
 import requests
-from langchain.agents import initialize_agent, AgentType
-from langchain_cohere import ChatCohere
+from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 import os
 load_dotenv()  
+
+GOOGLE_GENAI_MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-1.5-pro-latest")
 
 def generate_images_direct(topics):
     """Direct function to generate images without tool wrapper"""
@@ -29,7 +30,7 @@ def generate_images_direct(topics):
         
         url = "https://subnp.com/api/free/generate"  
         headers = {"Content-Type": "application/json"}
-        data = {"prompt": str(topic).strip(), "model": "magic"}
+        data = {"prompt": str(topic).strip(), "model": "flux"}
         
         try:
             response = requests.post(url, headers=headers, json=data, timeout=30)
@@ -82,7 +83,7 @@ def generate_images(topics: str):
         
         url = "https://subnp.com/api/free/generate"  
         headers = {"Content-Type": "application/json"}
-        data = {"prompt": str(topic).strip(), "model": "magic"}
+        data = {"prompt": str(topic).strip(), "model": "flux"}
         
         try:
             response = requests.post(url, headers=headers, json=data, timeout=30)
@@ -109,9 +110,13 @@ def generate_images(topics: str):
     print(f"Total images generated: {len(images)}")
     return images
 
-def run_agent(client_info, post_type, target_industry, content_goals):
+def run_agent(client_info, post_type, target_industry, content_goals, context: str = ""):
     """Generate content and images - returns data to post"""
-    llm = ChatCohere(temperature=0.5)
+    llm = ChatGoogleGenerativeAI(
+        temperature=0.5,
+        model=GOOGLE_GENAI_MODEL,
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+    )
     name = client_info.get('name', 'Professional')
     industry = client_info.get('industry', 'Technology')
     about = client_info.get('about', '')
@@ -125,6 +130,9 @@ def run_agent(client_info, post_type, target_industry, content_goals):
     - Industry: {industry}
     - Content Goal: {content_goals}
     - Target audience: {target_industry}
+    - Additional context (use verbatim where relevant): {context}
+    - About/summary: {about}
+    - Website notes: {website_content}
     
     INSTRUCTIONS:
     Create engaging LinkedIn content that:
@@ -133,6 +141,9 @@ def run_agent(client_info, post_type, target_industry, content_goals):
     3. Includes relevant industry insights or personal experiences
     4. Encourages meaningful engagement from their network
     5. Aligns with current trends in {industry}
+    6. Respect the provided context; do not invent facts.
+    7. Keep copy concise and scannable.
+    8. Image instructions must be realistic/photorealistic, natural lighting, no CGI look, no watermarks, no obvious AI artifacts.
 
     OUTPUT FORMAT (JSON only, no markdown or extra text):
     {{
@@ -186,17 +197,26 @@ def run_agent(client_info, post_type, target_industry, content_goals):
 
 def create_and_post_linkedin_content(content_data, image_urls, post_type, linkedin_urn, access_token):
     """Takes generated content and posts to LinkedIn"""
-    
+
     def upload_image_to_linkedin(image_url, access_token, person_urn):
         """Download image from URL and upload to LinkedIn"""
+        def try_download(url: str):
+            resp = requests.get(url, timeout=30)
+            if resp.status_code != 200:
+                raise Exception(f"Failed to download image: {resp.status_code}")
+            return resp.content
+
         try:
             print(f"Uploading image: {image_url}")
-            response = requests.get(image_url, timeout=30)
-            if response.status_code != 200:
-                raise Exception(f"Failed to download image: {response.status_code}")
-                
-            image_data = response.content
-            
+            image_data = try_download(image_url)
+        except Exception as e:
+            print(f"Primary download failed, retrying once for {image_url}: {e}")
+            try:
+                image_data = try_download(image_url)
+            except Exception as e2:
+                raise Exception(f"Upload failed for {image_url}: {e2}")
+
+        try:
             register_url = "https://api.linkedin.com/v2/assets?action=registerUpload"
             register_payload = {
                 "registerUploadRequest": {
@@ -207,33 +227,33 @@ def create_and_post_linkedin_content(content_data, image_urls, post_type, linked
                     ]
                 }
             }
-            
+
             register_response = requests.post(
-                register_url, 
-                json=register_payload, 
+                register_url,
+                json=register_payload,
                 headers={'Authorization': f'Bearer {access_token}'},
                 timeout=30
             )
-            
+
             if register_response.status_code != 200:
                 raise Exception(f"Registration failed: {register_response.status_code} - {register_response.text}")
-                
+
             register_data = register_response.json()
-            
+
             upload_url = register_data['value']['uploadMechanism']['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest']['uploadUrl']
-            
+
             upload_response = requests.post(
-                upload_url, 
-                data=image_data, 
+                upload_url,
+                data=image_data,
                 headers={'Content-Type': 'application/octet-stream'},
                 timeout=30
             )
-            
+
             if upload_response.status_code not in [200, 201]:
                 raise Exception(f"Upload failed: {upload_response.status_code}")
-            
+
             return register_data['value']['asset']
-            
+
         except Exception as e:
             raise Exception(f"Upload failed for {image_url}: {e}")
     

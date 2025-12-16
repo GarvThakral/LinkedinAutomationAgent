@@ -250,7 +250,8 @@ def run_agent_orch(payload: MakePostRequest):
             client_info=client_info,
             post_type="carousel",
             target_industry=client_info.get('industry'),
-            content_goals=f"{payload.contentRequirements} Tone of the post = {payload.postTone}. Context: {payload.context or ''}"
+            content_goals=f"{payload.contentRequirements} Tone of the post = {payload.postTone}.",
+            context=payload.context or ""
         )
         result["name"] = client_info['name']
         result["industry"] = client_info['industry']

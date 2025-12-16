@@ -1,6 +1,9 @@
-from langchain_cohere import ChatCohere
+from langchain_google_genai import ChatGoogleGenerativeAI
 import requests 
 import json
+import os
+
+GOOGLE_GENAI_MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-1.5-pro-latest")
 
 def upload_image_to_linkedin(image_url, access_token, person_urn):
         """Download image from URL and upload to LinkedIn"""
@@ -74,7 +77,7 @@ def generate_images_direct(topics):
         
         url = "https://subnp.com/api/free/generate"  
         headers = {"Content-Type": "application/json"}
-        data = {"prompt": str(topic).strip(), "model": "magic"}
+        data = {"prompt": str(topic).strip(), "model": "flux"}
         
         try:
             response = requests.post(url, headers=headers, json=data, timeout=30)
@@ -104,7 +107,11 @@ def generate_images_direct(topics):
 
 def regenerate(client_info,access_token,linkedin_urn):
     """Generate content and images - returns data to post"""
-    llm = ChatCohere(temperature=0.5)
+    llm = ChatGoogleGenerativeAI(
+        temperature=0.5,
+        model=GOOGLE_GENAI_MODEL,
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+    )
     content_goals = client_info.get('contentRequirements', 'Professional')
     industry = client_info.get('targetAudience', 'Technology')
     postTone = client_info.get('postTone', '')
@@ -125,6 +132,7 @@ def regenerate(client_info,access_token,linkedin_urn):
     3. Includes relevant industry insights or personal experiences
     4. Encourages meaningful engagement from their network
     5. Aligns with current trends in {industry}
+    6. Image instructions must be realistic/photorealistic, natural lighting, no CGI look, no watermarks, no obvious AI artifacts.
 
     OUTPUT FORMAT (JSON only, no markdown or extra text):
     {{
