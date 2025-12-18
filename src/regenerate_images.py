@@ -1,9 +1,10 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 import requests 
 import json
 import os
 
-GOOGLE_GENAI_MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-1.5-pro-latest")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "xiaomi/mimo-v2-flash:free")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 def upload_image_to_linkedin(image_url, access_token, person_urn):
         """Download image from URL and upload to LinkedIn"""
@@ -77,7 +78,7 @@ def generate_images_direct(topics):
         
         url = "https://subnp.com/api/free/generate"  
         headers = {"Content-Type": "application/json"}
-        data = {"prompt": str(topic).strip(), "model": "flux"}
+        data = {"prompt": str(topic).strip(), "model": "magic"}
         
         try:
             response = requests.post(url, headers=headers, json=data, timeout=30)
@@ -107,10 +108,11 @@ def generate_images_direct(topics):
 
 def regenerate(client_info,access_token,linkedin_urn):
     """Generate content and images - returns data to post"""
-    llm = ChatGoogleGenerativeAI(
+    llm = ChatOpenAI(
         temperature=0.5,
-        model=GOOGLE_GENAI_MODEL,
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        model=OPENROUTER_MODEL,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
     )
     content_goals = client_info.get('contentRequirements', 'Professional')
     industry = client_info.get('targetAudience', 'Technology')

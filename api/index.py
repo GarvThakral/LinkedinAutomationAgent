@@ -253,6 +253,11 @@ def run_agent_orch(payload: MakePostRequest):
             content_goals=f"{payload.contentRequirements} Tone of the post = {payload.postTone}.",
             context=payload.context or ""
         )
+        if result is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Content generation returned no result (likely JSON parse failure or missing GOOGLE_API_KEY)."
+            )
         result["name"] = client_info['name']
         result["industry"] = client_info['industry']
         return result

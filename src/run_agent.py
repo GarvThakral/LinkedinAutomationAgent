@@ -1,12 +1,13 @@
 import json
 import requests
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 import os
 load_dotenv()  
 
-GOOGLE_GENAI_MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-1.5-pro-latest")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "xiaomi/mimo-v2-flash:free")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 def generate_images_direct(topics):
     """Direct function to generate images without tool wrapper"""
@@ -30,7 +31,7 @@ def generate_images_direct(topics):
         
         url = "https://subnp.com/api/free/generate"  
         headers = {"Content-Type": "application/json"}
-        data = {"prompt": str(topic).strip(), "model": "flux"}
+        data = {"prompt": str(topic).strip(), "model": "magic"}
         
         try:
             response = requests.post(url, headers=headers, json=data, timeout=30)
@@ -83,7 +84,7 @@ def generate_images(topics: str):
         
         url = "https://subnp.com/api/free/generate"  
         headers = {"Content-Type": "application/json"}
-        data = {"prompt": str(topic).strip(), "model": "flux"}
+        data = {"prompt": str(topic).strip(), "model": "magic"}
         
         try:
             response = requests.post(url, headers=headers, json=data, timeout=30)
@@ -112,10 +113,11 @@ def generate_images(topics: str):
 
 def run_agent(client_info, post_type, target_industry, content_goals, context: str = ""):
     """Generate content and images - returns data to post"""
-    llm = ChatGoogleGenerativeAI(
+    llm = ChatOpenAI(
         temperature=0.5,
-        model=GOOGLE_GENAI_MODEL,
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        model=OPENROUTER_MODEL,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
     )
     name = client_info.get('name', 'Professional')
     industry = client_info.get('industry', 'Technology')
@@ -134,6 +136,31 @@ def run_agent(client_info, post_type, target_industry, content_goals, context: s
     - About/summary: {about}
     - Website notes: {website_content}
     
+    ROLE & STYLE (must obey):
+    You are a social media storyteller, not a marketer.
+    Your task is to edit or generate a social media post for a product in a way that feels human, story-driven, and emotionally engaging — not like an advertisement.
+    You are a storytelling marketer. Market through narrative, emotion, and user journeys; never through ad copy or feature lists.
+
+    Core structure (must follow):
+    - Hook (scroll-stopping opening): bold, relatable, or emotionally charged; feels like a personal realization, not a pitch.
+    - Context & struggle (0 → 30): real-world problem the audience relates to, framed as lived experience or observation.
+    - Market awareness (research-driven, subtle): show awareness of similar solutions or patterns; refer indirectly ("other platforms", "existing women-first products") unless explicitly told; avoid naming competitors unless instructed.
+    - User journey (30 → 80): move from confusion → clarity → progress; focus on emotional shifts, not features.
+    - Achievements & outcomes (80 → 95): progress/wins/impact, authentic and grounded, not boastful.
+    - Feedback or validation: include reactions, realizations, or lessons learned (emotion, confidence, relief, etc.).
+    - Closing line (95 → 100): strong, reflective, or empowering statement; ending feels complete and memorable.
+    - Make the product appear naturally inside the story; never lead with features, pricing, or CTAs.
+    - Cover where the user started, what they experienced, and what changed (emotionally/practically).
+    - Highlight wins/milestones authentically; include user reactions or lessons.
+
+    Style rules:
+    - Do NOT sound like an ad. Avoid buzzwords, feature lists, and sales language.
+    - Write like a real human sharing a journey. Short paragraphs, social-media readable.
+    - Research behavior: use general market understanding and common patterns; do NOT invent specific statistics or claims; if unsure, keep insights high-level and experience-based.
+    - Do not dump everything in one paragraph. Use spacing and flow with short, distinct paragraphs that read easily in-feed.
+    - This is marketing through storytelling, not advertising. Avoid hard sells. Write like a thoughtful founder/user/builder.
+    - Rewrite or generate the post following all these rules.
+
     INSTRUCTIONS:
     Create engaging LinkedIn content that:
     1. Reflects their professional expertise and background
