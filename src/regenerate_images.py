@@ -2,9 +2,20 @@ from langchain_openai import ChatOpenAI
 import requests 
 import json
 import os
+import time
+import hashlib
+import urllib.parse
 
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "xiaomi/mimo-v2-flash:free")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "")
+POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN", "")
+CLOUDINARY_CLOUD = os.getenv("CLOUDINARY_CLOUD_NAME", "")
+CLOUDINARY_KEY = os.getenv("CLOUDINARY_API_KEY", "")
+CLOUDINARY_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
+CLOUDINARY_FOLDER = os.getenv("CLOUDINARY_FOLDER", None)
+IMAGE_GEN_MAX_RETRIES = int(os.getenv("IMAGE_GEN_MAX_RETRIES", "5"))
+IMAGE_GEN_RETRY_DELAY_SEC = float(os.getenv("IMAGE_GEN_RETRY_DELAY_SEC", "2"))
 
 def upload_image_to_linkedin(image_url, access_token, person_urn):
         """Download image from URL and upload to LinkedIn"""
@@ -56,11 +67,56 @@ def upload_image_to_linkedin(image_url, access_token, person_urn):
         except Exception as e:
             raise Exception(f"Upload failed for {image_url}: {e}")
 
+def _fetch_pollinations_bytes(prompt: str) -> bytes:
+    if not POLLINATIONS_TOKEN:
+        raise RuntimeError("POLLINATIONS_TOKEN missing")
+    if not POLLINATIONS_MODEL:
+        raise RuntimeError("POLLINATIONS_MODEL missing")
+    safe_prompt = urllib.parse.quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{safe_prompt}?nologo=true&model={POLLINATIONS_MODEL}"
+    headers = {"Authorization": f"Bearer {POLLINATIONS_TOKEN}"}
+    resp = requests.get(url, headers=headers, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Pollinations failed: {resp.status_code} {resp.text[:200]}")
+    return resp.content
+
+
+def _sign_cloudinary(params: dict, api_secret: str) -> str:
+    sorted_items = sorted((k, v) for k, v in params.items() if v is not None)
+    to_sign = "&".join([f"{k}={v}" for k, v in sorted_items]) + api_secret
+    return hashlib.sha1(to_sign.encode("utf-8")).hexdigest()
+
+
+def _upload_cloudinary(img_bytes: bytes, filename: str) -> str:
+    if not (CLOUDINARY_CLOUD and CLOUDINARY_KEY and CLOUDINARY_SECRET):
+        raise RuntimeError("Cloudinary credentials missing")
+    timestamp = int(time.time())
+    params = {"timestamp": timestamp}
+    if CLOUDINARY_FOLDER:
+        params["folder"] = CLOUDINARY_FOLDER
+    signature = _sign_cloudinary(params, CLOUDINARY_SECRET)
+    upload_url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD}/image/upload"
+    files = {"file": (filename, img_bytes, "application/octet-stream")}
+    data = {
+        "timestamp": timestamp,
+        "api_key": CLOUDINARY_KEY,
+        "signature": signature,
+    }
+    if CLOUDINARY_FOLDER:
+        data["folder"] = CLOUDINARY_FOLDER
+    resp = requests.post(upload_url, data=data, files=files, timeout=60)
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"Cloudinary upload failed: {resp.status_code} {resp.text[:200]}")
+    secure_url = resp.json().get("secure_url")
+    if not secure_url:
+        raise RuntimeError(f"Unexpected Cloudinary response: {resp.text[:200]}")
+    return secure_url
+
+
 def generate_images_direct(topics):
-    """Direct function to generate images without tool wrapper"""
+    """Direct function to generate images via Pollinations -> Cloudinary."""
     print(f"Generating images for topics: {topics}")
     
-    # Handle input
     if isinstance(topics, str):
         try:
             topics = json.loads(topics)
@@ -69,38 +125,30 @@ def generate_images_direct(topics):
     elif not isinstance(topics, list):
         topics = [str(topics)]
     
-    # Limit to 3 images max
     topics = topics[:3]
     
     images = []
     for i, topic in enumerate(topics):
-        print(f"Generating image {i+1}/{len(topics)}: {topic}")
-        
-        url = "https://subnp.com/api/free/generate"  
-        headers = {"Content-Type": "application/json"}
-        data = {"prompt": str(topic).strip(), "model": "magic"}
-        
-        try:
-            response = requests.post(url, headers=headers, json=data, timeout=30)
-            data_raw = response.content.decode().strip()
-
+        attempt = 0
+        while True:
+            attempt += 1
+            print(
+                f"Generating image {i+1}/{len(topics)} (attempt {attempt}/{IMAGE_GEN_MAX_RETRIES}): {topic} "
+                f"(model={POLLINATIONS_MODEL})"
+            )
             try:
-                data = json.loads(data_raw)
-            except json.JSONDecodeError:
-                try:
-                    data = json.loads(data_raw.split("\n")[-1][6:])
-                except:
-                    print(f"Failed to parse response for topic {topic}: {data_raw}")
-                    continue
-
-            if 'imageUrl' in data:
-                print(f"Generated: {data['imageUrl']}")
-                images.append(data['imageUrl'])
-            else:
-                print(f"No imageUrl found in response for topic {topic}: {data}")
-                
-        except Exception as e:
-            print(f"Error generating image for topic {topic}: {e}")
+                img_bytes = _fetch_pollinations_bytes(str(topic).strip())
+                filename = f"pollinations_regen_{int(time.time())}_{i}.jpg"
+                secure_url = _upload_cloudinary(img_bytes, filename)
+                print(f"Generated and uploaded: {secure_url}")
+                images.append(secure_url)
+                break
+            except Exception as e:
+                print(f"Error generating image for topic {topic}: {e}")
+                if attempt >= IMAGE_GEN_MAX_RETRIES:
+                    print(f"Giving up after {IMAGE_GEN_MAX_RETRIES} attempts for topic: {topic}")
+                    break
+                time.sleep(IMAGE_GEN_RETRY_DELAY_SEC)
             
     print(f"Total images generated: {len(images)}")
     return images
@@ -165,12 +213,6 @@ def regenerate(client_info,access_token,linkedin_urn):
     # Call the direct function instead
     try:
         image_urls = generate_images_direct(content_data['image_instructions'])
-        if not image_urls:
-            image_urls = [
-                "https://free-cdn.mitraai.xyz/b4f006e7-f485-4785-a008-3236c284e2d8.jpg",
-                "https://free-cdn.mitraai.xyz/3adcd7be-ede2-4cc8-8e89-4298bf6cbbf8.jpg",
-                "https://free-cdn.mitraai.xyz/8329263a-fdcc-4429-964d-de61a90e0f23.jpg"
-            ]
     except Exception as e:
         print(f"Image generation failed: {e}")
         image_urls = []

@@ -1,142 +1,133 @@
 import argparse
-import base64
+import hashlib
 import os
-import textwrap
+import time
+import urllib.parse
 import requests
-import json
-
+from dotenv import load_dotenv
+load_dotenv()
 """
-Image generator using Gemini's native API.
-- Uses the native Google Generative Language API (not OpenAI-compatible endpoint)
-- Supports gemini-2.5-flash-image and other image generation models
+Test script: pull an image from Pollinations (bytes) and upload to Cloudinary.
+Env required:
+  POLLINATIONS_TOKEN
+  CLOUDINARY_CLOUD_NAME
+  CLOUDINARY_API_KEY
+  CLOUDINARY_API_SECRET
 """
 
-# Use the native API endpoint
-API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-DEFAULT_MODEL = "gemini-2.5-flash-image"
+
+def fetch_pollinations_image(prompt: str, model: str, token: str) -> tuple[bytes, str]:
+    safe_prompt = urllib.parse.quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{safe_prompt}?nologo=true&model={model}"
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(url, headers=headers, timeout=60)
+    resp.raise_for_status()
+    mime = resp.headers.get("Content-Type", "application/octet-stream")
+    return resp.content, mime
 
 
-def build_prompt(subject: str, aspect: str) -> str:
-    """Build an enhanced prompt for image generation."""
-    return textwrap.dedent(
-        f"""
-        Create a realistic, non-AI-looking photograph of {subject}.
-        - Cinematic lighting, ultra sharp, 8k resolution feel.
-        - No text, no watermarks, no artifacts.
-        - Frame and composition must honor a {aspect} aspect ratio.
-        """
-    ).strip()
+def sign_cloudinary(params: dict, api_secret: str) -> str:
+    # Cloudinary signature: sha1 of sorted params joined with '&' plus api_secret
+    sorted_items = sorted((k, v) for k, v in params.items() if v is not None)
+    to_sign = "&".join([f"{k}={v}" for k, v in sorted_items]) + api_secret
+    return hashlib.sha1(to_sign.encode("utf-8")).hexdigest()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate an image with Gemini image model.")
-    parser.add_argument(
-        "--subject",
-        default="a modern desk setup with laptop, coffee mug, and soft daylight",
-        help="What to depict in the image.",
-    )
-    parser.add_argument(
-        "--aspect",
-        default="16:9",
-        help="Aspect ratio hint to bake into the prompt (e.g., 16:9 or 9:16).",
-    )
-    parser.add_argument(
-        "--output",
-        default="gemini_image.png",
-        help="Where to write the generated image.",
-    )
-    parser.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help="Model to use (e.g., gemini-2.5-flash-image, gemini-3-pro-image-preview)",
-    )
+def upload_to_cloudinary(
+    img_bytes: bytes,
+    filename: str,
+    cloud_name: str,
+    api_key: str,
+    api_secret: str,
+    folder: str | None = None,
+) -> str:
+    timestamp = int(time.time())
+    params = {"timestamp": timestamp, "folder": folder} if folder else {"timestamp": timestamp}
+    signature = sign_cloudinary(params, api_secret)
+
+    upload_url = f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload"
+    files = {"file": (filename, img_bytes, "application/octet-stream")}
+    data = {
+        "timestamp": timestamp,
+        "api_key": api_key,
+        "signature": signature,
+    }
+    if folder:
+        data["folder"] = folder
+
+    resp = requests.post(upload_url, data=data, files=files, timeout=60)
+    resp.raise_for_status()
+    secure_url = resp.json().get("secure_url")
+    if not secure_url:
+        raise RuntimeError(f"Unexpected Cloudinary response: {resp.text}")
+    return secure_url
+
+
+def build_prompt(base: str, style: str) -> str:
+    if style == "text":
+        return f"{base}. Text-forward graphic on clean background, readable typography, quote-card feel."
+    if style == "story":
+        return f"{base}. Vertical 9:16 story, 1080x1920, high-contrast, legible typography on simple background."
+    return base
+
+
+def main():
+    load_dotenv()
+    parser = argparse.ArgumentParser(description="Fetch Pollinations image and upload to Cloudinary.")
+    parser.add_argument("--prompt", default="people fighting", help="Prompt to send to Pollinations.")
+    parser.add_argument("--model", default=None, help="Ignored; model is always read from POLLINATIONS_MODEL env.")
+    parser.add_argument("--folder", default=None, help="Optional Cloudinary folder.")
+    parser.add_argument("--filename", default="pollinations.jpg", help="Filename to upload.")
+    parser.add_argument("--count", type=int, default=1, help="How many images to generate/upload.")
+    parser.add_argument("--style", choices=["normal", "text", "story"], default="normal", help="Prompt style variant.")
     args = parser.parse_args()
 
-    # Read API key from environment variable
-    api_key = "AIzaSyB43unoPREdYj455hr3TIGoy1YULTL69rs"
-    if not api_key:
-        raise SystemExit("Missing GOOGLE_API_KEY in environment. Set it with: export GOOGLE_API_KEY='your-key-here'")
+    poll_token = os.getenv("POLLINATIONS_TOKEN")
+    poll_model = os.getenv("POLLINATIONS_MODEL")
+    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+    cloud_key = os.getenv("CLOUDINARY_API_KEY")
+    cloud_secret = os.getenv("CLOUDINARY_API_SECRET")
 
-    prompt = build_prompt(args.subject, args.aspect)
-    
-    # Build the API URL with the model and API key
-    url = f"{API_BASE}/{args.model}:generateContent?key={api_key}"
-    
-    # Payload for native Gemini API
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 1.0,
-            "topP": 0.95,
-            "topK": 64,
-            "maxOutputTokens": 8192,
-        }
-    }
+    if not poll_token:
+        raise SystemExit("Missing POLLINATIONS_TOKEN in environment.")
+    if not poll_model:
+        raise SystemExit("Missing POLLINATIONS_MODEL in environment.")
+    if not (cloud_name and cloud_key and cloud_secret):
+        raise SystemExit("Missing Cloudinary envs (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET).")
 
-    headers = {
-        "Content-Type": "application/json",
-    }
+    urls = []
+    for i in range(max(1, args.count)):
+        prompt = build_prompt(args.prompt, args.style)
+        fname = args.filename
+        if args.count > 1:
+            name, ext = os.path.splitext(args.filename)
+            fname = f"{name}_{i+1}{ext or '.jpg'}"
 
-    print(f"Using model: {args.model}")
-    print(f"Generating image with prompt: {prompt[:100]}...")
-    
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        
-        # Extract the image from the response
-        # Gemini image models return inline data in the response
-        if "candidates" in data and len(data["candidates"]) > 0:
-            candidate = data["candidates"][0]
-            if "content" in candidate and "parts" in candidate["content"]:
-                for part in candidate["content"]["parts"]:
-                    if "inlineData" in part:
-                        # Found the image data
-                        mime_type = part["inlineData"]["mimeType"]
-                        image_b64 = part["inlineData"]["data"]
-                        
-                        # Decode and save
-                        image_bytes = base64.b64decode(image_b64)
-                        
-                        # Determine file extension from mime type
-                        ext = args.output.split('.')[-1]
-                        if 'png' in mime_type.lower():
-                            ext = 'png'
-                        elif 'jpeg' in mime_type.lower() or 'jpg' in mime_type.lower():
-                            ext = 'jpg'
-                        
-                        output_file = args.output if '.' in args.output else f"{args.output}.{ext}"
-                        
-                        with open(output_file, "wb") as f:
-                            f.write(image_bytes)
-                        
-                        print(f"✓ Image saved to {output_file}")
-                        print(f"  MIME type: {mime_type}")
-                        print(f"  Size: {len(image_bytes):,} bytes")
-                        return
-        
-        # If we got here, the response format was unexpected
-        print(f"Unexpected response format. Full response:")
-        print(json.dumps(data, indent=2))
-        
-    except requests.exceptions.HTTPError as e:
-        print(f"HTTP Error: {e}")
-        print(f"Response: {resp.text}")
-        raise SystemExit(1)
-    except Exception as e:
-        print(f"Error: {e}")
-        if 'resp' in locals():
-            print(f"Response: {resp.text}")
-        raise SystemExit(1)
+        print(f"[{i+1}/{args.count}] Fetching image from Pollinations model={poll_model} style={args.style} prompt='{prompt}'...")
+        try:
+            img_bytes, mime = fetch_pollinations_image(prompt, poll_model, poll_token)
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            body = e.response.text if getattr(e, "response", None) else ""
+            if status == 403:
+                raise SystemExit(f"Pollinations 403 Unauthorized. Check POLLINATIONS_TOKEN (set, no quotes/spaces) and restart. Body: {body[:200]}")
+            raise
+
+        print(f"Fetched {len(img_bytes):,} bytes (mime={mime}). Uploading to Cloudinary as {fname}...")
+        secure_url = upload_to_cloudinary(
+            img_bytes=img_bytes,
+            filename=fname,
+            cloud_name=cloud_name,
+            api_key=cloud_key,
+            api_secret=cloud_secret,
+            folder=args.folder,
+        )
+        print(f"✅ Uploaded: {secure_url}")
+        urls.append(secure_url)
+
+    print("\nAll uploaded URLs:")
+    for u in urls:
+        print(u)
 
 
 if __name__ == "__main__":

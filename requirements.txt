@@ -11,3 +11,5 @@ bs4
 langchain-openai
 langchain-google-genai
 praw
+pillow
+gTTS

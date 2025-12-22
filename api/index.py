@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
 from src.user_details import get_user_details
-from src.run_agent import run_agent
+from src.run_agent import run_agent, run_automated_agent
+from src.video_generation import generate_video_from_prompt
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -15,11 +16,50 @@ from src.run_agent import create_and_post_linkedin_content
 import io
 from src.regenerate_images import regenerate
 from urllib.parse import urlencode
+import threading
+import uuid
+import time
 
 # Load environment variables
 load_dotenv()
 
 app = FastAPI()
+
+VIDEO_JOBS: dict[str, dict] = {}
+VIDEO_LOCK = threading.Lock()
+
+
+def _compute_video_progress(job: dict) -> int:
+    script_total = job.get("script_total") or 0
+    script_ready = job.get("script_ready") or 0
+    frames_total = job.get("frames_total") or 0
+    frames_ready = job.get("frames_ready") or 0
+    status = job.get("status", "")
+
+    progress = 0
+    if status == "scripting":
+        progress = 10
+    if script_total and script_ready >= script_total:
+        progress = 20
+    if frames_total:
+        progress = max(progress, 20 + int((frames_ready / frames_total) * 70))
+    if status == "uploading":
+        progress = 95
+    if status == "ready":
+        progress = 100
+    if status == "failed":
+        progress = 0
+    return min(progress, 100)
+
+
+def _update_video_job(job_id: str, **fields: Any) -> None:
+    with VIDEO_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(fields)
+        job["updated_at"] = time.time()
+        job["progress"] = _compute_video_progress(job)
 
 # ---------------- NEON DB CONFIG ----------------
 NEON_CONNECTION_STRING = os.getenv("NEON_CONNECTION_STRING")
@@ -144,10 +184,78 @@ def build_reddit_oauth_url(state: str = "reddit_state"):
     return f"https://www.reddit.com/api/v1/authorize?{urlencode(params)}"
 
 
-def create_instagram_media_container(ig_user_id: str, page_token: str, image_url: str, caption: str):
+def create_instagram_media_container(ig_user_id: str, page_token: str, image_url: str, caption: str, media_type: str | None = None):
     url = f"https://graph.facebook.com/v20.0/{ig_user_id}/media"
     payload = {"image_url": image_url, "caption": caption, "access_token": page_token}
+    if media_type and media_type.upper() == "STORIES":
+        payload["media_type"] = "STORIES"
     res = requests.post(url, data=payload, timeout=20)
+    data = res.json()
+    if "error" in data:
+        raise HTTPException(status_code=400, detail=data["error"])
+    return data.get("id")
+
+
+def create_instagram_video_container(ig_user_id: str, page_token: str, video_url: str, caption: str):
+    url = f"https://graph.facebook.com/v20.0/{ig_user_id}/media"
+    payload = {
+        "video_url": video_url,
+        "caption": caption or "",
+        "media_type": "REELS",
+        "access_token": page_token,
+    }
+    res = requests.post(url, data=payload, timeout=60)
+    data = res.json()
+    if "error" in data:
+        raise HTTPException(status_code=400, detail=data["error"])
+    return data.get("id")
+
+
+def wait_for_instagram_media_ready(container_id: str, page_token: str):
+    max_attempts = int(os.getenv("IG_VIDEO_STATUS_MAX_ATTEMPTS", "60"))
+    delay_sec = float(os.getenv("IG_VIDEO_STATUS_DELAY_SEC", "5"))
+    for _ in range(max_attempts):
+        status_res = requests.get(
+            f"https://graph.facebook.com/v20.0/{container_id}",
+            params={"fields": "status_code", "access_token": page_token},
+            timeout=20,
+        )
+        status_data = status_res.json()
+        if "error" in status_data:
+            raise HTTPException(status_code=400, detail=status_data["error"])
+        status_code = status_data.get("status_code")
+        if status_code == "FINISHED":
+            return
+        if status_code == "ERROR":
+            raise HTTPException(status_code=400, detail="Video processing failed")
+        time.sleep(delay_sec)
+    raise HTTPException(status_code=400, detail="Video processing timeout")
+
+
+def create_instagram_carousel(ig_user_id: str, page_token: str, image_urls: List[str], caption: str):
+    # create child containers
+    child_ids = []
+    for url in image_urls:
+        cid = create_instagram_media_container(
+            ig_user_id=ig_user_id,
+            page_token=page_token,
+            image_url=url,
+            caption="",  # captions not used on children
+            media_type=None
+        )
+        if cid:
+            child_ids.append(cid)
+    if not child_ids:
+        raise HTTPException(status_code=400, detail="Failed to create any child media for carousel")
+    # create carousel container
+    carousel_payload = {
+        "access_token": page_token,
+        "caption": caption,
+        "children": ",".join(child_ids),
+        "media_type": "CAROUSEL",
+    }
+    url = f"https://graph.facebook.com/v20.0/{ig_user_id}/media"
+    res = requests.post(url, data=carousel_payload, timeout=20)
     data = res.json()
     if "error" in data:
         raise HTTPException(status_code=400, detail=data["error"])
@@ -163,12 +271,62 @@ def publish_instagram_media(ig_user_id: str, page_token: str, creation_id: str):
         raise HTTPException(status_code=400, detail=data["error"])
     return data
 
+
+def verify_instagram_post(post_id: str, page_token: str):
+    res = requests.get(
+        f"https://graph.facebook.com/v20.0/{post_id}",
+        params={"fields": "id,permalink,media_type", "access_token": page_token},
+        timeout=20,
+    )
+    data = res.json()
+    if "error" in data:
+        return False, data
+    return True, data
+
+
+def publish_instagram_with_verification(ig_user_id: str, page_token: str, creation_id: str):
+    max_attempts = int(os.getenv("IG_PUBLISH_VERIFY_ATTEMPTS", "3"))
+    base_delay = float(os.getenv("IG_PUBLISH_VERIFY_DELAY_SEC", "3"))
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        publish_result = publish_instagram_media(ig_user_id, page_token, creation_id)
+        post_id = publish_result.get("id")
+        if not post_id:
+            last_error = "Missing post id from publish response"
+        else:
+            time.sleep(base_delay)
+            verified, verify_data = verify_instagram_post(post_id, page_token)
+            if verified:
+                return {
+                    "publish_result": publish_result,
+                    "verified": True,
+                    "verify_data": verify_data,
+                }
+            last_error = verify_data
+        # backoff before retry
+        time.sleep(base_delay * attempt)
+    raise HTTPException(status_code=400, detail=f"Publish verification failed: {last_error}")
+
 # ---------------- COMMON MODELS ----------------
 class MakePostRequest(BaseModel):
     contentRequirements: str
     targetAudience: str
     postTone: str
     context: str | None = None
+
+class AutomatedMakePostRequest(BaseModel):
+    projectName: str
+    projectDescription: str
+    targetAudience: str
+    contentTone: str | None = None
+    page: str | None = None
+    context: str | None = None
+    imageType: str | None = "normal"  # normal | text
+    instagramPostType: str | None = "posts"  # posts | stories
+
+class VideoGenerateRequest(BaseModel):
+    prompt: str
+    shot_count: int | None = None
 
 class LinkedInData(BaseModel):
     code: str
@@ -185,8 +343,16 @@ class InstagramTokenRequest(BaseModel):
 class InstagramPublishRequest(BaseModel):
     page_token: str
     ig_user_id: str
-    image_url: str
+    image_url: str | None = None
+    image_urls: List[str] | None = None
     caption: str = "Posted via API"
+    media_type: str | None = None  # "IMAGE" default, or "STORIES"
+
+class InstagramVideoPublishRequest(BaseModel):
+    page_token: str
+    ig_user_id: str
+    video_url: str
+    caption: str | None = ""
 
 class RedditTokenRequest(BaseModel):
     code: str
@@ -267,6 +433,33 @@ def run_agent_orch(payload: MakePostRequest):
     finally:
         cursor.close()
         conn.close()
+
+@app.post('/makepost/automated')
+def run_agent_automated(payload: AutomatedMakePostRequest):
+    """Create a post for automated sheet flow without touching user_details table"""
+    try:
+        result = run_automated_agent(
+            project_name=payload.projectName or "Project",
+            project_description=payload.projectDescription or "",
+            target_audience=payload.targetAudience or "General",
+            content_tone=payload.contentTone or "Professional",
+            page=payload.page or "",
+            post_type="carousel",
+            image_type=payload.imageType or "normal",
+            instagram_post_type=payload.instagramPostType or "posts",
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Content generation returned no result (likely JSON parse failure or missing API key)."
+            )
+        result["name"] = payload.projectName or "Project"
+        result["industry"] = payload.targetAudience or "General"
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating automated post: {str(e)}")
 
 class LinkedInData(BaseModel):
     code: str
@@ -374,18 +567,115 @@ def instagram_pages(user_token: str = Query(..., description="User access token 
 
 @app.post("/instagram/publish")
 def instagram_publish(payload: InstagramPublishRequest):
-    creation_id = create_instagram_media_container(
-        ig_user_id=payload.ig_user_id,
-        page_token=payload.page_token,
-        image_url=payload.image_url,
-        caption=payload.caption,
-    )
-    publish_result = publish_instagram_media(
+    # If multiple images provided, publish as carousel
+    if payload.image_urls and len(payload.image_urls) > 1:
+        creation_id = create_instagram_carousel(
+            ig_user_id=payload.ig_user_id,
+            page_token=payload.page_token,
+            image_urls=payload.image_urls[:10],  # IG carousel max 10
+            caption=payload.caption,
+        )
+    else:
+        if not payload.image_url and payload.image_urls:
+            payload.image_url = payload.image_urls[0]
+        creation_id = create_instagram_media_container(
+            ig_user_id=payload.ig_user_id,
+            page_token=payload.page_token,
+            image_url=payload.image_url,
+            caption=payload.caption,
+            media_type=payload.media_type,
+        )
+    result = publish_instagram_with_verification(
         ig_user_id=payload.ig_user_id,
         page_token=payload.page_token,
         creation_id=creation_id,
     )
-    return {"status": "success", "creation_id": creation_id, "publish_result": publish_result}
+    return {
+        "status": "success",
+        "creation_id": creation_id,
+        "publish_result": result.get("publish_result"),
+        "verified": result.get("verified"),
+        "verify_data": result.get("verify_data"),
+    }
+
+@app.post("/video/start")
+def start_video(payload: VideoGenerateRequest):
+    if not payload.prompt:
+        raise HTTPException(status_code=400, detail="Missing prompt")
+    job_id = str(uuid.uuid4())
+    with VIDEO_LOCK:
+        VIDEO_JOBS[job_id] = {
+            "status": "queued",
+            "script_total": payload.shot_count or 0,
+            "script_ready": 0,
+            "frames_total": payload.shot_count or 0,
+            "frames_ready": 0,
+            "video_url": None,
+            "error": None,
+            "progress": 0,
+            "updated_at": time.time(),
+        }
+
+    def _runner():
+        try:
+            def cb(update: dict):
+                _update_video_job(job_id, **update)
+
+            _update_video_job(job_id, status="scripting")
+            result = generate_video_from_prompt(payload.prompt, payload.shot_count, progress_cb=cb)
+            _update_video_job(
+                job_id,
+                status="ready",
+                video_url=result.get("video_url"),
+                captions_applied=result.get("captions_applied", False),
+            )
+        except Exception as e:
+            _update_video_job(job_id, status="failed", error=str(e))
+
+    threading.Thread(target=_runner, daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.get("/video/status")
+def video_status(job_id: str = Query(...)):
+    with VIDEO_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.post("/video/generate")
+def generate_video(payload: VideoGenerateRequest):
+    if not payload.prompt:
+        raise HTTPException(status_code=400, detail="Missing prompt")
+    try:
+        return generate_video_from_prompt(payload.prompt, payload.shot_count)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Video generation failed: {str(e)}")
+
+
+@app.post("/instagram/publish-video")
+def instagram_publish_video(payload: InstagramVideoPublishRequest):
+    creation_id = create_instagram_video_container(
+        ig_user_id=payload.ig_user_id,
+        page_token=payload.page_token,
+        video_url=payload.video_url,
+        caption=payload.caption or "",
+    )
+    wait_for_instagram_media_ready(creation_id, payload.page_token)
+    result = publish_instagram_with_verification(
+        ig_user_id=payload.ig_user_id,
+        page_token=payload.page_token,
+        creation_id=creation_id,
+    )
+    return {
+        "status": "success",
+        "creation_id": creation_id,
+        "publish_result": result.get("publish_result"),
+        "verified": result.get("verified"),
+        "verify_data": result.get("verify_data"),
+    }
 
 @app.post("/upload-csv")
 async def upload_csv(
