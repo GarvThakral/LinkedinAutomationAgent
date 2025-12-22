@@ -244,6 +244,8 @@ def create_instagram_carousel(ig_user_id: str, page_token: str, image_urls: List
             media_type=None
         )
         if cid:
+            # wait for each child container to be ready before building carousel
+            wait_for_instagram_media_ready(cid, page_token)
             child_ids.append(cid)
     if not child_ids:
         raise HTTPException(status_code=400, detail="Failed to create any child media for carousel")
@@ -585,6 +587,7 @@ def instagram_publish(payload: InstagramPublishRequest):
             caption=payload.caption,
             media_type=payload.media_type,
         )
+    wait_for_instagram_media_ready(creation_id, payload.page_token)
     result = publish_instagram_with_verification(
         ig_user_id=payload.ig_user_id,
         page_token=payload.page_token,
