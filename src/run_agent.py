@@ -284,9 +284,15 @@ def run_automated_agent(
     """Generate content for automated sheet-driven posts (LinkedIn/Instagram/Reddit)."""
     # If Instagram stories, skip text generation and craft image instructions directly
     if instagram_post_type.lower() == "stories":
-        story_prompt = "Vertical 9:16 Instagram story, 1080x1920, high-contrast, legible typography on simple background."
+        story_prompt = (
+            "Vertical 9:16 Instagram story, 1080x1920, full-frame, no borders, "
+            "high-contrast, legible typography on a simple background."
+        )
         if image_type == "text":
-            story_prompt += " Text-forward design, minimal illustration, brand-like quote card."
+            story_prompt += (
+                " Minimalist editorial quote card: warm beige background, large elegant serif headline, "
+                "smaller subtext, centered layout, generous whitespace, no photos or icons."
+            )
         content_data = {
             "content_draft": "",
             "hashtag_suggestions": [],
@@ -302,7 +308,11 @@ def run_automated_agent(
 
         image_style = "photorealistic product/people visual"
         if image_type == "text":
-            image_style = "text-forward graphic on clean background, quote-card style, readable typography"
+            image_style = (
+                "minimalist typographic poster, warm neutral background (beige/cream), "
+                "large elegant serif headline, smaller sans-serif subtext, centered layout, "
+                "high contrast, generous whitespace, no photos or icons"
+            )
 
         content_prompt = f"""
     You are a storytelling marketer.
@@ -337,6 +347,10 @@ def run_automated_agent(
     CHANNEL NOTE:
     - Copy should be channel-agnostic but suitable for LinkedIn/Instagram/Reddit feed posts.
     - Provide hashtag suggestions that fit the audience and platform tone.
+
+    SPECIAL IMAGE INSTRUCTIONS:
+    - If the desired image style is text-forward, make each image instruction a short quote/headline (<= 8 words)
+      and include the typography/layout cues (serif headline, small subtext, neutral background, centered layout).
 
     OUTPUT FORMAT (JSON only, no markdown):
     {{
